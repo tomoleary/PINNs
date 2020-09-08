@@ -4,10 +4,28 @@
 
 import sys
 sys.path.insert(0, '../../Utilities/')
-
+import warnings
+warnings.filterwarnings("ignore")
 import tensorflow as tf
+tf.get_logger().setLevel('INFO')
+tf.autograph.set_verbosity(1)
+# if int(tf.__version__[0]) > 1:
+#     import tensorflow.compat.v1 as tf
+#     tf.disable_v2_behavior()
+# import os
+# os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3' 
+# os.environ['KMP_DUPLICATE_LIB_OK']='True'
+# os.environ["KMP_WARNINGS"] = "FALSE" 
+
+import logging
+import os
+os.environ['KMP_DUPLICATE_LIB_OK']='True'
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'  # FATAL
+logging.getLogger('tensorflow').setLevel(logging.FATAL)
+
 import numpy as np
 import matplotlib.pyplot as plt
+
 import scipy.io
 from scipy.interpolate import griddata
 import time
@@ -17,6 +35,28 @@ from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 from plotting import newfig, savefig
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 import matplotlib.gridspec as gridspec
+
+
+sys.path.append( os.environ.get('HESSIANLEARN_PATH', "../../"))
+
+import hessianlearn as hln
+
+# from hessianlearn import *
+
+
+class PINNProblem(hln.problem.Problem):
+    def __init__(self,NeuralNetwork,inputs = None,outputs = None, dtype = tf.float32):
+        super(PINNProblem,self).__init__(NeuralNetwork,inputs = inputs,outputs = outputs,dtype=dtype)
+
+    def _initialize_neural_network(self, NeuralNetwork,inputs,outputs):
+        self.x_tf,self.y_tf,self.t_tf = inputs
+        self.u_pred, self.u_tf, self.v_pred, self.v_tf, self.f_u_pred, self.f_v_pred = outputs
+
+    def _initialize_loss(self):
+        self.loss = tf.reduce_sum(tf.square(self.u_tf - self.u_pred)) + \
+                    tf.reduce_sum(tf.square(self.v_tf - self.v_pred)) + \
+                    tf.reduce_sum(tf.square(self.f_u_pred)) + \
+                    tf.reduce_sum(tf.square(self.f_v_pred))
 
 np.random.seed(1234)
 tf.set_random_seed(1234)
@@ -60,22 +100,30 @@ class PhysicsInformedNN:
         self.v_tf = tf.placeholder(tf.float32, shape=[None, self.v.shape[1]])
         
         self.u_pred, self.v_pred, self.p_pred, self.f_u_pred, self.f_v_pred = self.net_NS(self.x_tf, self.y_tf, self.t_tf)
+
+        # Initialize PINN Problem here (must pass in everything that is used in loss function)
+        # Initialize loss function and all hessian vector product stuff here
+
+        self.problem = PINNProblem(None,inputs = [self.x_tf,self.y_tf,self.t_tf],\
+            outputs = [self.u_pred, self.u_tf, self.v_pred, self.v_tf, self.f_u_pred, self.f_v_pred])
+
+        self.regularization = hln.L2Regularization(self.problem,gamma = 0.0*1e-1)
         
-        self.loss = tf.reduce_sum(tf.square(self.u_tf - self.u_pred)) + \
-                    tf.reduce_sum(tf.square(self.v_tf - self.v_pred)) + \
-                    tf.reduce_sum(tf.square(self.f_u_pred)) + \
-                    tf.reduce_sum(tf.square(self.f_v_pred))
+        # self.loss = tf.reduce_sum(tf.square(self.u_tf - self.u_pred)) + \
+        #             tf.reduce_sum(tf.square(self.v_tf - self.v_pred)) + \
+        #             tf.reduce_sum(tf.square(self.f_u_pred)) + \
+        #             tf.reduce_sum(tf.square(self.f_v_pred))
                     
-        self.optimizer = tf.contrib.opt.ScipyOptimizerInterface(self.loss, 
-                                                                method = 'L-BFGS-B', 
-                                                                options = {'maxiter': 50000,
-                                                                           'maxfun': 50000,
-                                                                           'maxcor': 50,
-                                                                           'maxls': 50,
-                                                                           'ftol' : 1.0 * np.finfo(float).eps})        
+        # self.optimizer = tf.contrib.opt.ScipyOptimizerInterface(self.loss, 
+        #                                                         method = 'L-BFGS-B', 
+        #                                                         options = {'maxiter': 50000,
+        #                                                                    'maxfun': 50000,
+        #                                                                    'maxcor': 50,
+        #                                                                    'maxls': 50,
+        #                                                                    'ftol' : 1.0 * np.finfo(float).eps})        
         
-        self.optimizer_Adam = tf.train.AdamOptimizer()
-        self.train_op_Adam = self.optimizer_Adam.minimize(self.loss)                    
+        # self.optimizer_Adam = tf.train.AdamOptimizer()
+        # self.train_op_Adam = self.optimizer_Adam.minimize(self.loss)                    
         
         init = tf.global_variables_initializer()
         self.sess.run(init)
@@ -84,30 +132,41 @@ class PhysicsInformedNN:
         weights = []
         biases = []
         num_layers = len(layers) 
-        for l in range(0,num_layers-1):
-            W = self.xavier_init(size=[layers[l], layers[l+1]])
-            b = tf.Variable(tf.zeros([1,layers[l+1]], dtype=tf.float32), dtype=tf.float32)
+        for l in range(0,num_layers-2):
+            W = self.xavier_init(size=[layers[l], layers[l+1]],name = 'weight_layer'+str(l))
+            b = tf.Variable(tf.zeros([1,layers[l+1]], dtype=tf.float32), dtype=tf.float32,name = 'bias_layer'+str(l))
             weights.append(W)
-            biases.append(b)        
+            biases.append(b)     
+        # Since the loss function only involves derivatives of the output of the neural network
+        # It is not a function of the last layer bias, so I omit the last layer bias
+        l += 1 
+        W = self.xavier_init(size=[layers[l], layers[l+1]],name = 'weight_layer'+str(l))
+        weights.append(W)
+        biases.append(None) # Doing this to keep them the same length for now
         return weights, biases
         
-    def xavier_init(self, size):
+    def xavier_init(self, size,name = None):
         in_dim = size[0]
         out_dim = size[1]        
         xavier_stddev = np.sqrt(2/(in_dim + out_dim))
-        return tf.Variable(tf.truncated_normal([in_dim, out_dim], stddev=xavier_stddev), dtype=tf.float32)
+        if name == None:
+            return tf.Variable(tf.truncated_normal([in_dim, out_dim], stddev=xavier_stddev), dtype=tf.float32)
+        else:
+            return tf.Variable(tf.truncated_normal([in_dim, out_dim], stddev=xavier_stddev), dtype=tf.float32,name = name)
     
     def neural_net(self, X, weights, biases):
         num_layers = len(weights) + 1
         
         H = 2.0*(X - self.lb)/(self.ub - self.lb) - 1.0
-        for l in range(0,num_layers-2):
-            W = weights[l]
-            b = biases[l]
+        # for l in range(0,num_layers-2):
+        #     W = weights[l]
+        #     b = biases[l]
+        #     H = tf.tanh(tf.add(tf.matmul(H, W), b))
+        for W,b in zip(weights[:-1],biases[:-1]):
             H = tf.tanh(tf.add(tf.matmul(H, W), b))
         W = weights[-1]
-        b = biases[-1]
-        Y = tf.add(tf.matmul(H, W), b)
+        # b = biases[-1]
+        Y = tf.matmul(H, W)
         return Y
         
     def net_NS(self, x, y, t):
@@ -115,8 +174,9 @@ class PhysicsInformedNN:
         lambda_2 = self.lambda_2
         
         psi_and_p = self.neural_net(tf.concat([x,y,t], 1), self.weights, self.biases)
-        psi = psi_and_p[:,0:1]
-        p = psi_and_p[:,1:2]
+
+        psi = psi_and_p[:,0:]
+        p = psi_and_p[:,1]
         
         u = tf.gradients(psi, y)[0]
         v = -tf.gradients(psi, x)[0]  
@@ -162,11 +222,73 @@ class PhysicsInformedNN:
                 print('It: %d, Loss: %.3e, l1: %.3f, l2: %.5f, Time: %.2f' % 
                       (it, loss_value, lambda_1_value, lambda_2_value, elapsed))
                 start_time = time.time()
-            
+        print('Finishing adam training and starting L-BFGS?')
         self.optimizer.minimize(self.sess,
                                 feed_dict = tf_dict,
                                 fetches = [self.loss, self.lambda_1, self.lambda_2],
                                 loss_callback = self.callback)
+
+    def hessianlearn_train(self,nIter, opt_choice = 'lrsfn',N_hess_train = 100):
+        feed_dict = {self.x_tf: self.x, self.y_tf: self.y, self.t_tf: self.t,
+                   self.u_tf: self.u, self.v_tf: self.v}
+        N_train = self.x.shape[0]
+
+
+        optimizer = hln.algorithms.Adam(self.problem,self.regularization,self.sess)
+        start_time = time.time()
+        for it in range(100):
+            elapsed = time.time() - start_time
+            loss_value = self.sess.run(self.problem.loss, feed_dict)
+            lambda_1_value = self.sess.run(self.lambda_1)
+            lambda_2_value = self.sess.run(self.lambda_2)
+            print('It: %d, Loss: %.3e, l1: %.3f, l2: %.5f, Time: %.2f' % 
+                  (it, loss_value, lambda_1_value, lambda_2_value, elapsed))
+            start_time = time.time()
+
+            optimizer.minimize(feed_dict)
+
+
+        if opt_choice == 'lrsfn':
+            optimizer = hln.algorithms.LowRankSaddleFreeNewton(self.problem,self.regularization,self.sess)
+            optimizer.parameters['globalization'] = 'line_search'
+            # optimizer.parameters['globalization'] = 'None'
+            # optimizer.parameters['alpha'] = 1e-4
+            optimizer.parameters['max_backtracking_iter'] = 18
+            optimizer.parameters['default_damping'] = 1e-1
+            optimizer.parameters['hessian_low_rank'] = 5
+
+        elif opt_choice == 'adam':
+            optimizer = hln.algorithms.Adam(self.problem,self.regularization,self.sess)
+
+        elif opt_choice == 'gd':
+            optimizer = hln.algorithms.GradientDescent(self.problem,self.regularization,self.sess)
+
+        start_time = time.time()
+
+        for it in range(nIter):
+            
+            # Print
+            if it % 1 == 0:
+                elapsed = time.time() - start_time
+                loss_value = self.sess.run(self.problem.loss, feed_dict)
+                lambda_1_value = self.sess.run(self.lambda_1)
+                lambda_2_value = self.sess.run(self.lambda_2)
+                try:
+                    print('It: %d, Loss: %.3e, l1: %.3f, l2: %.5f, Time: %.2f, alpha %.3e' % 
+                          (it, loss_value, lambda_1_value, lambda_2_value, elapsed,optimizer.alpha))
+                except:
+                    print('It: %d, Loss: %.3e, l1: %.3f, l2: %.5f, Time: %.2f' % 
+                          (it, loss_value, lambda_1_value, lambda_2_value, elapsed))
+                start_time = time.time()
+
+            hessian_idx = np.random.choice(N_train,N_hess_train, replace=True)
+            hess_dict = {self.x_tf: self.x[hessian_idx,:], self.y_tf: self.y[hessian_idx,:], self.t_tf: self.t[hessian_idx,:],
+                   self.u_tf: self.u[hessian_idx,:], self.v_tf: self.v[hessian_idx,:]}
+            try:
+                optimizer.minimize(feed_dict, hessian_feed_dict = hess_dict)
+            except:
+                optimizer.minimize(feed_dict)
+
             
     
     def predict(self, x_star, y_star, t_star):
@@ -209,7 +331,9 @@ if __name__ == "__main__":
       
     N_train = 5000
     
-    layers = [3, 20, 20, 20, 20, 20, 20, 20, 20, 2]
+    # layers = [3, 20, 20, 20, 20, 20, 20, 20, 20, 2]
+
+    layers = [3,20,20,2]
     
     # Load Data
     data = scipy.io.loadmat('../Data/cylinder_nektar_wake.mat')
@@ -252,7 +376,9 @@ if __name__ == "__main__":
 
     # Training
     model = PhysicsInformedNN(x_train, y_train, t_train, u_train, v_train, layers)
-    model.train(200000)
+    # model.train(200000)
+    model.hessianlearn_train(100)
+
     
     # Test Data
     snap = np.array([100])
@@ -304,25 +430,25 @@ if __name__ == "__main__":
     P_exact = griddata(X_star, p_star.flatten(), (X, Y), method='cubic')
     
     
-    ######################################################################
-    ########################### Noisy Data ###############################
-    ######################################################################
-    noise = 0.01        
-    u_train = u_train + noise*np.std(u_train)*np.random.randn(u_train.shape[0], u_train.shape[1])
-    v_train = v_train + noise*np.std(v_train)*np.random.randn(v_train.shape[0], v_train.shape[1])    
+    # ######################################################################
+    # ########################### Noisy Data ###############################
+    # ######################################################################
+    # noise = 0.01        
+    # u_train = u_train + noise*np.std(u_train)*np.random.randn(u_train.shape[0], u_train.shape[1])
+    # v_train = v_train + noise*np.std(v_train)*np.random.randn(v_train.shape[0], v_train.shape[1])    
 
-    # Training
-    model = PhysicsInformedNN(x_train, y_train, t_train, u_train, v_train, layers)
-    model.train(200000)
+    # # Training
+    # model = PhysicsInformedNN(x_train, y_train, t_train, u_train, v_train, layers)
+    # model.train(200000)
         
-    lambda_1_value_noisy = model.sess.run(model.lambda_1)
-    lambda_2_value_noisy = model.sess.run(model.lambda_2)
+    # lambda_1_value_noisy = model.sess.run(model.lambda_1)
+    # lambda_2_value_noisy = model.sess.run(model.lambda_2)
       
-    error_lambda_1_noisy = np.abs(lambda_1_value_noisy - 1.0)*100
-    error_lambda_2_noisy = np.abs(lambda_2_value_noisy - 0.01)/0.01 * 100
+    # error_lambda_1_noisy = np.abs(lambda_1_value_noisy - 1.0)*100
+    # error_lambda_2_noisy = np.abs(lambda_2_value_noisy - 0.01)/0.01 * 100
         
-    print('Error l1: %.5f%%' % (error_lambda_1_noisy))                             
-    print('Error l2: %.5f%%' % (error_lambda_2_noisy))     
+    # print('Error l1: %.5f%%' % (error_lambda_1_noisy))                             
+    # print('Error l2: %.5f%%' % (error_lambda_2_noisy))     
 
              
     
