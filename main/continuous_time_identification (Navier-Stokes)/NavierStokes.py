@@ -53,10 +53,10 @@ class PINNProblem(hln.problem.Problem):
         self.u_pred, self.u_tf, self.v_pred, self.v_tf, self.f_u_pred, self.f_v_pred = outputs
 
     def _initialize_loss(self):
-        self.loss = tf.reduce_sum(tf.square(self.u_tf - self.u_pred)) + \
-                    tf.reduce_sum(tf.square(self.v_tf - self.v_pred)) + \
-                    tf.reduce_sum(tf.square(self.f_u_pred)) + \
-                    tf.reduce_sum(tf.square(self.f_v_pred))
+        self.loss = tf.reduce_mean(tf.square(self.u_tf - self.u_pred)) + \
+                    tf.reduce_mean(tf.square(self.v_tf - self.v_pred)) + \
+                    tf.reduce_mean(tf.square(self.f_u_pred)) + \
+                    tf.reduce_mean(tf.square(self.f_v_pred))
 
 np.random.seed(1234)
 tf.set_random_seed(1234)
@@ -107,23 +107,25 @@ class PhysicsInformedNN:
         self.problem = PINNProblem(None,inputs = [self.x_tf,self.y_tf,self.t_tf],\
             outputs = [self.u_pred, self.u_tf, self.v_pred, self.v_tf, self.f_u_pred, self.f_v_pred])
 
-        self.regularization = hln.L2Regularization(self.problem,gamma = 0.0*1e-1)
+        self.regularization = hln.L2Regularization(self.problem,gamma = 0.0)
         
         # self.loss = tf.reduce_sum(tf.square(self.u_tf - self.u_pred)) + \
         #             tf.reduce_sum(tf.square(self.v_tf - self.v_pred)) + \
         #             tf.reduce_sum(tf.square(self.f_u_pred)) + \
         #             tf.reduce_sum(tf.square(self.f_v_pred))
                     
-        # self.optimizer = tf.contrib.opt.ScipyOptimizerInterface(self.loss, 
-        #                                                         method = 'L-BFGS-B', 
-        #                                                         options = {'maxiter': 50000,
-        #                                                                    'maxfun': 50000,
-        #                                                                    'maxcor': 50,
-        #                                                                    'maxls': 50,
-        #                                                                    'ftol' : 1.0 * np.finfo(float).eps})        
+        self.loss = self.problem.loss 
+
+        self.optimizer = tf.contrib.opt.ScipyOptimizerInterface(self.loss, 
+                                                                method = 'L-BFGS-B', 
+                                                                options = {'maxiter': 5000,
+                                                                           'maxfun': 5000,
+                                                                           'maxcor': 50,
+                                                                           'maxls': 50,
+                                                                           'ftol' : 1.0 * np.finfo(float).eps})        
         
-        # self.optimizer_Adam = tf.train.AdamOptimizer()
-        # self.train_op_Adam = self.optimizer_Adam.minimize(self.loss)                    
+        self.optimizer_Adam = tf.train.AdamOptimizer()
+        self.train_op_Adam = self.optimizer_Adam.minimize(self.loss)                    
         
         init = tf.global_variables_initializer()
         self.sess.run(init)
@@ -209,44 +211,45 @@ class PhysicsInformedNN:
         tf_dict = {self.x_tf: self.x, self.y_tf: self.y, self.t_tf: self.t,
                    self.u_tf: self.u, self.v_tf: self.v}
         
-        start_time = time.time()
-        for it in range(nIter):
-            self.sess.run(self.train_op_Adam, tf_dict)
+        # start_time = time.time()
+        # for it in range(nIter):
+        #     self.sess.run(self.train_op_Adam, tf_dict)
             
-            # Print
-            if it % 10 == 0:
-                elapsed = time.time() - start_time
-                loss_value = self.sess.run(self.loss, tf_dict)
-                lambda_1_value = self.sess.run(self.lambda_1)
-                lambda_2_value = self.sess.run(self.lambda_2)
-                print('It: %d, Loss: %.3e, l1: %.3f, l2: %.5f, Time: %.2f' % 
-                      (it, loss_value, lambda_1_value, lambda_2_value, elapsed))
-                start_time = time.time()
+        #     # Print
+        #     if it % 10 == 0:
+        #         elapsed = time.time() - start_time
+        #         loss_value = self.sess.run(self.loss, tf_dict)
+        #         lambda_1_value = self.sess.run(self.lambda_1)
+        #         lambda_2_value = self.sess.run(self.lambda_2)
+        #         print('It: %d, Loss: %.3e, l1: %.3f, l2: %.5f, Time: %.2f' % 
+        #               (it, loss_value, lambda_1_value, lambda_2_value, elapsed))
+        #         start_time = time.time()
         print('Finishing adam training and starting L-BFGS?')
         self.optimizer.minimize(self.sess,
                                 feed_dict = tf_dict,
                                 fetches = [self.loss, self.lambda_1, self.lambda_2],
                                 loss_callback = self.callback)
 
-    def hessianlearn_train(self,nIter, opt_choice = 'lrsfn',N_hess_train = 100):
-        feed_dict = {self.x_tf: self.x, self.y_tf: self.y, self.t_tf: self.t,
-                   self.u_tf: self.u, self.v_tf: self.v}
+    def hessianlearn_train(self,nIter, opt_choice = 'lrsfn',batch_size = 5000,hess_batch_size = 500):
+        all_dict = {self.x_tf: self.x, self.y_tf: self.y, self.t_tf: self.t,
+               self.u_tf: self.u, self.v_tf: self.v}
         N_train = self.x.shape[0]
-
-
+        idx = np.random.choice(N_train,batch_size, replace=True)
+        batch_dict = {self.x_tf: self.x[idx,:], self.y_tf: self.y[idx,:], self.t_tf: self.t[idx,:],
+               self.u_tf: self.u[idx,:], self.v_tf: self.v[idx,:]}
+        
         optimizer = hln.algorithms.Adam(self.problem,self.regularization,self.sess)
         start_time = time.time()
-        for it in range(100):
+        for it in range(0):
             elapsed = time.time() - start_time
-            loss_value = self.sess.run(self.problem.loss, feed_dict)
+            loss_value = self.sess.run(self.problem.loss, all_dict)
             lambda_1_value = self.sess.run(self.lambda_1)
             lambda_2_value = self.sess.run(self.lambda_2)
             print('It: %d, Loss: %.3e, l1: %.3f, l2: %.5f, Time: %.2f' % 
                   (it, loss_value, lambda_1_value, lambda_2_value, elapsed))
             start_time = time.time()
 
-            optimizer.minimize(feed_dict)
-
+            optimizer.minimize(all_dict)
 
         if opt_choice == 'lrsfn':
             optimizer = hln.algorithms.LowRankSaddleFreeNewton(self.problem,self.regularization,self.sess)
@@ -254,40 +257,67 @@ class PhysicsInformedNN:
             # optimizer.parameters['globalization'] = 'None'
             # optimizer.parameters['alpha'] = 1e-4
             optimizer.parameters['max_backtracking_iter'] = 18
-            optimizer.parameters['default_damping'] = 1e-1
+            optimizer.parameters['default_damping'] = 1e-2
             optimizer.parameters['hessian_low_rank'] = 5
+            batch_factor = [batch_size/N_train,hess_batch_size/N_train]
+
+        elif opt_choice == 'incg':
+            optimizer = hln.algorithms.InexactNewtonCG(self.problem,self.regularization,self.sess)
+            optimizer.parameters['globalization'] = 'line_search'
+            # optimizer.parameters['globalization'] = 'None'
+            # optimizer.parameters['alpha'] = 1e-4
+            optimizer.parameters['max_backtracking_iter'] = 18
+            batch_factor = [batch_size/N_train,hess_batch_size/N_train]
 
         elif opt_choice == 'adam':
             optimizer = hln.algorithms.Adam(self.problem,self.regularization,self.sess)
+            batch_factor = [batch_size/N_train,0.0]
 
         elif opt_choice == 'gd':
             optimizer = hln.algorithms.GradientDescent(self.problem,self.regularization,self.sess)
+            optimizer.parameters['globalization'] = 'line_search'
+            batch_factor = [batch_size/N_train,0.0]
 
         start_time = time.time()
 
         for it in range(nIter):
-            
-            # Print
-            if it % 1 == 0:
-                elapsed = time.time() - start_time
-                loss_value = self.sess.run(self.problem.loss, feed_dict)
-                lambda_1_value = self.sess.run(self.lambda_1)
-                lambda_2_value = self.sess.run(self.lambda_2)
-                try:
-                    print('It: %d, Loss: %.3e, l1: %.3f, l2: %.5f, Time: %.2f, alpha %.3e' % 
-                          (it, loss_value, lambda_1_value, lambda_2_value, elapsed,optimizer.alpha))
-                except:
-                    print('It: %d, Loss: %.3e, l1: %.3f, l2: %.5f, Time: %.2f' % 
-                          (it, loss_value, lambda_1_value, lambda_2_value, elapsed))
-                start_time = time.time()
-
-            hessian_idx = np.random.choice(N_train,N_hess_train, replace=True)
+            idx = np.random.choice(N_train,batch_size, replace=True)
+            batch_dict = {self.x_tf: self.x[idx,:], self.y_tf: self.y[idx,:], self.t_tf: self.t[idx,:],
+                   self.u_tf: self.u[idx,:], self.v_tf: self.v[idx,:]}
+            hessian_idx = np.random.choice(N_train,hess_batch_size, replace=True)
             hess_dict = {self.x_tf: self.x[hessian_idx,:], self.y_tf: self.y[hessian_idx,:], self.t_tf: self.t[hessian_idx,:],
                    self.u_tf: self.u[hessian_idx,:], self.v_tf: self.v[hessian_idx,:]}
+            # Print
+            if it % 1 == 0:
+
+                elapsed = time.time() - start_time
+                loss_batch,norm_g = self.sess.run([self.problem.loss,self.problem.norm_g], batch_dict)
+                loss_all = self.sess.run(self.problem.loss,all_dict)
+                lambda_1_value = self.sess.run(self.lambda_1)[0]
+                lambda_2_value = self.sess.run(self.lambda_2)[0]
+                # try:
+                #     print('It: %d, Loss: %.3e, l1: %.3f, l2: %.5f, Time: %.2f, alpha %.3e' % 
+                #           (it, loss_value, lambda_1_value, lambda_2_value, elapsed,optimizer.alpha))
+                # except:
+                #     print('It: %d, Loss: %.3e, l1: %.3f, l2: %.5f, Time: %.2f' % 
+                #           (it, loss_value, lambda_1_value, lambda_2_value, elapsed))
+                sweeps = np.dot(batch_factor,optimizer.sweeps)
+                try:
+                    print(' {0:1.4e} {1:^8.2f} {2:1.4e} {3:1.4e}  {4:1.4e} {5:1.4e} {6:1.4e} {7:1.4e} {8:1.4e}'.format(\
+                        it, sweeps, loss_batch,norm_g,loss_all,optimizer.alpha,elapsed,lambda_1_value,lambda_2_value))
+                except:
+                    print('{0:1.4e} {1:^8.2f} {2:1.4e} {3:1.4e}  {4:1.4e} {5:1.4e} {6:1.4e} {7:1.4e} {8:1.4e}'.format(\
+                        it, sweeps, loss_batch,norm_g,loss_all,0,elapsed,lambda_1_value,lambda_2_value))
+                start_time = time.time()
+
+            
             try:
-                optimizer.minimize(feed_dict, hessian_feed_dict = hess_dict)
+                optimizer.minimize(batch_dict, hessian_feed_dict = hess_dict)
             except:
-                optimizer.minimize(feed_dict)
+                optimizer.minimize(batch_dict)
+
+            batch_dict.clear()
+            hess_dict.clear()
 
             
     
@@ -376,8 +406,10 @@ if __name__ == "__main__":
 
     # Training
     model = PhysicsInformedNN(x_train, y_train, t_train, u_train, v_train, layers)
-    # model.train(200000)
-    model.hessianlearn_train(100)
+    # Add testing data for during training validation:
+
+    model.train(2000)
+    model.hessianlearn_train(10000)
 
     
     # Test Data
